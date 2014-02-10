@@ -60,11 +60,14 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
   // Do not touch or move this code; connects the disk
   dconnect();
 
-  v = create_vcb(0);
-  dread(0, (char *)v);
+  vcb vx; 
+  if ((dread(0, (char *)&vx)) < 0) {
+    perror("dread");
+  }
+  if (vx.magic != MAGIC) {
+    perror("Wrong disk, magic # is incorrect");
+  }
 
-
-  
   return NULL;
 }
 

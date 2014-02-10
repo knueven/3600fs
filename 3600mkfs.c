@@ -27,10 +27,6 @@ void myformat(int size) {
   // Do not touch or move this function
   dcreate_connect();
 
-  // set vcb data and write to disk
-    vcb *v = create_vcb(777);
-
-  dwrite(0, (char *)v);
   /* 3600: FILL IN CODE HERE.  YOU SHOULD INITIALIZE ANY ON-DISK
            STRUCTURES TO THEIR INITIAL VALUE, AS YOU ARE FORMATTING
            A BLANK DISK.  YOUR DISK SHOULD BE size BLOCKS IN SIZE. */
@@ -38,17 +34,26 @@ void myformat(int size) {
   /* 3600: AN EXAMPLE OF READING/WRITING TO THE DISK IS BELOW - YOU'LL
            WANT TO REPLACE THE CODE BELOW WITH SOMETHING MEANINGFUL. */
 
-  // first, create a zero-ed out array of memory  
+  // first, create a zero-edout array of memory  
   char * tmp= (char *) malloc(BLOCKSIZE);
   memset(tmp, 0, BLOCKSIZE);
+  int x = sizeof(vcb);
 
   // now, write that to every block
-  for (int i=1; i<size; i++) 
+  for (int i=0; i<size; i++) 
     if (dwrite(i, tmp) < 0) 
       perror("Error while writing to disk");
 
   // voila! we now have a disk containing all zeros
 
+  //and now create the VCB and write it to disk
+    // set vcb data and write to disk
+    vcb *v = create_vcb(777);
+
+  if (dwrite(0, (char *)v) < 0) {
+    perror("Error while writing to disk");
+  }
+    free(tmp);
   // Do not touch or move this function
   dunconnect();
 }
