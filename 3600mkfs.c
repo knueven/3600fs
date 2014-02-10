@@ -20,11 +20,17 @@
 
 #include "3600fs.h"
 #include "disk.h"
+#include "structs.c"
+
 
 void myformat(int size) {
   // Do not touch or move this function
   dcreate_connect();
 
+  // set vcb data and write to disk
+    vcb *v = create_vcb(777);
+
+  dwrite(0, (char *)v);
   /* 3600: FILL IN CODE HERE.  YOU SHOULD INITIALIZE ANY ON-DISK
            STRUCTURES TO THEIR INITIAL VALUE, AS YOU ARE FORMATTING
            A BLANK DISK.  YOUR DISK SHOULD BE size BLOCKS IN SIZE. */
@@ -33,11 +39,11 @@ void myformat(int size) {
            WANT TO REPLACE THE CODE BELOW WITH SOMETHING MEANINGFUL. */
 
   // first, create a zero-ed out array of memory  
-  char *tmp = (char *) malloc(BLOCKSIZE);
+  char * tmp= (char *) malloc(BLOCKSIZE);
   memset(tmp, 0, BLOCKSIZE);
 
   // now, write that to every block
-  for (int i=0; i<size; i++) 
+  for (int i=1; i<size; i++) 
     if (dwrite(i, tmp) < 0) 
       perror("Error while writing to disk");
 

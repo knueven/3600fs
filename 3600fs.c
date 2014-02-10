@@ -37,6 +37,12 @@
 
 #include "3600fs.h"
 #include "disk.h"
+#include "structs.c"
+
+ // Global VCB
+vcb *v;
+char * disk_status;
+int num_blocks;
 
 /*
  * Initialize filesystem. Read in file system metadata and initialize
@@ -48,14 +54,17 @@
  *
  */
 static void* vfs_mount(struct fuse_conn_info *conn) {
+  UNUSED(conn);
   fprintf(stderr, "vfs_mount called\n");
 
   // Do not touch or move this code; connects the disk
   dconnect();
 
-  /* 3600: YOU SHOULD ADD CODE HERE TO CHECK THE CONSISTENCY OF YOUR DISK
-           AND LOAD ANY DATA STRUCTURES INTO MEMORY */
+  v = create_vcb(0);
+  dread(0, (char *)v);
 
+
+  
   return NULL;
 }
 
@@ -64,6 +73,7 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
  *
  */
 static void vfs_unmount (void *private_data) {
+  UNUSED(private_data);
   fprintf(stderr, "vfs_unmount called\n");
 
   /* 3600: YOU SHOULD ADD CODE HERE TO MAKE SURE YOUR ON-DISK STRUCTURES
@@ -87,7 +97,8 @@ static void vfs_unmount (void *private_data) {
  */
 static int vfs_getattr(const char *path, struct stat *stbuf) {
   fprintf(stderr, "vfs_getattr called\n");
-
+  UNUSED(path);
+  UNUSED(stbuf);
   // Do not mess with this code 
   stbuf->st_nlink = 1; // hard links
   stbuf->st_rdev  = 0;
