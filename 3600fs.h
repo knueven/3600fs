@@ -31,7 +31,9 @@ typedef struct vcb_s {
 int magic; //777?
 // description of the disk layout
 int blocksize; //512
-char name[504];
+int de_start; //will be block 1
+int de_end; //will be block 101
+char name[475];
 } vcb;
 
 // Directory Entry
@@ -55,7 +57,7 @@ unsigned int eof:1;
 unsigned int next:30;
 } fatent;
 
-vcb *create_vcb(int magic);
+vcb *create_vcb();
 
 
 

@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <sys/statfs.h>
+#include <sys/stat.h>
 
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
@@ -40,9 +41,20 @@
 #include "structs.c"
 
  // Global VCB
-vcb *v;
+vcb v;
 char * disk_status;
 int num_blocks;
+
+vcb getvcb(){
+  vcb vb;
+  char temp_vb[BLOCKSIZE];
+  memset(temp_vb, 0, BLOCKSIZE);
+  if (dread(0, temp_vb) < 0) {
+	perror("dread");
+	}
+  memcpy(&vb, temp_vb, sizeof(vcb));
+  return vb;
+}
 
 /*
  * Initialize filesystem. Read in file system metadata and initialize
@@ -60,11 +72,8 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
   // Do not touch or move this code; connects the disk
   dconnect();
 
-  vcb vx; 
-  if ((dread(0, (char *)&vx)) < 0) {
-    perror("dread");
-  }
-  if (vx.magic != MAGIC) {
+  v = getvcb();
+  if (v.magic != MAGIC) {
     perror("Wrong disk, magic # is incorrect");
   }
 
@@ -261,7 +270,7 @@ static int vfs_rename(const char *from, const char *to)
  */
 static int vfs_chmod(const char *file, mode_t mode)
 {
-
+    chmod(file, mode);
     return 0;
 }
 
