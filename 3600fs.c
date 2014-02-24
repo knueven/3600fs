@@ -50,10 +50,21 @@ vcb getvcb(){
   char temp_vb[BLOCKSIZE];
   memset(temp_vb, 0, BLOCKSIZE);
   if (dread(0, temp_vb) < 0) {
-	perror("dread");
+	fprintf(stderr, "Error reading VCB\n");
 	}
   memcpy(&vb, temp_vb, sizeof(vcb));
   return vb;
+}
+
+dirent getdirent(int block) {
+  dirent dir;
+  char temp_dir[BLOCKSIZE];
+  memset(temp_dir, 0, BLOCKSIZE);
+  if (dread(block, temp_dir) < 0) {
+    fprintf(stderr, "Error reading dirent at block %d\n", block);
+  }
+  memcpy(&dir, temp_dir, sizeof(dirent));
+  return dir;
 }
 
 /*
@@ -75,7 +86,7 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
   v = getvcb();
   //if we're dealing with the wrong disk. you should unmount if this error is thrown
   if (v.magic != MAGIC) {
-    fprintf(stderr, "Wrong disk, magic # is incorrect");
+    fprintf(stderr, "Wrong disk, magic # is incorrect\n");
   }
 
   return NULL;
@@ -123,18 +134,41 @@ static int vfs_getattr(const char *path, struct stat *stbuf) {
       stbuf->st_gid = getgid();
       return 0;
   }
-  /*
-  else 
-    stbuf->st_mode  = <<file mode>> | S_IFREG;
+  for(int i = 0; i < 100; i++) {
+    //read the dirent at block i
+    dirent mydirent = getdirent(i);
+    if ((strcmp(mydirent.name, path) == 0) && (mydirent.valid == 1)) {
+      fprintf( stderr, "In getattr: found the file %s in dirents\n", path);
+    stbuf->st_uid =  mydirent.user;
+    stbuf->st_gid = mydirent.group;
+    //Creates pointers to structures so I can use them to get time
+    struct tm * acctm; //access time
+    struct tm * modtm; //modify time
+    struct tm * cretm; //created time
+    //localtime comverts tv_sec from timespec into a struct tm
+    acctm = localtime(&((mydirent.access_time).tv_sec));
+    modtm = localtime(&((mydirent.modify_time).tv_sec));
+    cretm = localtime(&((mydirent.create_time).tv_sec));
+    //and mktime makes sure things like the 40th of a month don't happen
+    stbuf->st_atime = mktime(acctm);
+    stbuf->st_mtime = mktime(modtm);
+    stbuf->st_ctime = mktime(cretm);
 
-  stbuf->st_uid     = // file uid
-  stbuf->st_gid     = // file gid
-  stbuf->st_atime   = // access time 
-  stbuf->st_mtime   = // modify time
-  stbuf->st_ctime   = // create time
-  stbuf->st_size    = // file size
-  stbuf->st_blocks  = // file size in blocks
-    */
+    //set mode and size
+    stbuf->st_mode = mydirent.mode;
+    stbuf->st_size = mydirent.size;
+    if( mydirent.size == 0) 
+      stbuf->st_blocks = 1;//a special case cause we allocate a block just when a file is creted
+    else {
+      stbuf->st_blocks  = ((mydirent.size -1) /BLOCKSIZE)  + 1;
+      return 0;
+      }
+    }
+  } //end of for loop
+  
+  // if control reaches here, it means the file did not exist
+  fprintf(stderr, "File not found by vfs_getattr");
+  return -ENOENT;
 
   return 0;
 }

@@ -76,6 +76,7 @@ void myformat(int size) {
   if (dwrite(0, (char *)v) < 0) {
     perror("Error while writing to disk");
   }
+    //we're done with tmp
     free(tmp);
 
   //Create an empty directory
