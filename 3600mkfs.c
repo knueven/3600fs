@@ -20,8 +20,31 @@
 
 #include "3600fs.h"
 #include "disk.h"
-#include "structs.c"
 
+//creates a VCB with the atributes set in 3600fs.h
+vcb *create_vcb(int size) {
+    vcb *s;
+    //allocate memory and check that it worked
+    s = (vcb *)calloc(1, sizeof(vcb));
+    assert(s != NULL);
+
+    //set magic number and block size
+    s->magic = MAGIC;
+    s->blocksize = BLOCKSIZE;
+
+    //set the start/end of the directory entries
+    s->de_start = DE_START; //1
+    s->de_length = DE_LENGTH;
+    int nblocks = size - 101; // this is the total blocks after dirent table
+    // of these, some are fat table blocks, and rest are storage blocks
+    s->fat_length = nblocks / 128 + 1;  
+    s->fat_start = DE_LENGTH + 1;  
+    s->db_start = DE_LENGTH + s->fat_length + 1;
+    //only data blocks remain after the FAT table, therefore, that is the number of FAT entries
+    s->num_fatents = nblocks - s->fat_start - s->fat_length; 
+
+    return s;
+}
 
 void myformat(int size) {
   // Do not touch or move this function
@@ -37,7 +60,6 @@ void myformat(int size) {
   // first, create a zero-edout array of memory  
   char * tmp= (char *) malloc(BLOCKSIZE);
   memset(tmp, 0, BLOCKSIZE);
-  int x = sizeof(vcb);
 
   // now, write that to every block
   for (int i=0; i<size; i++) 
@@ -47,16 +69,31 @@ void myformat(int size) {
   // voila! we now have a disk containing all zeros
 
   //and now create the VCB and write it to disk
-    // set vcb data and write to disk
-    vcb *v = create_vcb(777);
-
+  // set vcb data 
+  vcb *v = create_vcb(size);
+  
+  //and write VCB to disk
   if (dwrite(0, (char *)v) < 0) {
     perror("Error while writing to disk");
   }
     free(tmp);
+
+  //Create an empty directory
+  dirent tempde;
+  tempde.valid = 0; //0 = not in use (free)
+  char dtmp[BLOCKSIZE]; //right now dirents take up the entire block
+  memset(dtmp, 0, BLOCKSIZE); 
+  memcpy(dtmp, &tempde, sizeof(dirent));
+
+  //For loop that copies data into DE entries
+  //will start at 1 and write to de_length + 1
+  for (int i=1; i<DE_LENGTH+1; i++) {
+    dwrite(i, dtmp);
+  }
   // Do not touch or move this function
   dunconnect();
 }
+
 
 int main(int argc, char** argv) {
   // Do not touch this function

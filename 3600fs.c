@@ -38,7 +38,7 @@
 
 #include "3600fs.h"
 #include "disk.h"
-#include "structs.c"
+
 
  // Global VCB
 vcb v;
@@ -73,8 +73,9 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
   dconnect();
 
   v = getvcb();
+  //if we're dealing with the wrong disk. you should unmount if this error is thrown
   if (v.magic != MAGIC) {
-    perror("Wrong disk, magic # is incorrect");
+    fprintf(stderr, "Wrong disk, magic # is incorrect");
   }
 
   return NULL;
@@ -108,19 +109,21 @@ static void vfs_unmount (void *private_data) {
  *
  */
 static int vfs_getattr(const char *path, struct stat *stbuf) {
-  fprintf(stderr, "vfs_getattr called\n");
-  UNUSED(path);
-  UNUSED(stbuf);
+  fprintf(stderr, "vfs_getattr called on %s\n", path);
+  
   // Do not mess with this code 
   stbuf->st_nlink = 1; // hard links
   stbuf->st_rdev  = 0;
   stbuf->st_blksize = BLOCKSIZE;
 
-  /* 3600: YOU MUST UNCOMMENT BELOW AND IMPLEMENT THIS CORRECTLY */
-  
+  //if (The path represents the root directory)
+  if (strcmp(path, "/") == 0) {
+      stbuf->st_mode  = 0777 | S_IFDIR;
+      stbuf->st_uid = getuid();
+      stbuf->st_gid = getgid();
+      return 0;
+  }
   /*
-  if (The path represents the root directory)
-    stbuf->st_mode  = 0777 | S_IFDIR;
   else 
     stbuf->st_mode  = <<file mode>> | S_IFREG;
 
