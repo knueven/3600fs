@@ -70,7 +70,7 @@ typedef struct fatent_s {
     unsigned int next:30;
 } fatent;
 
-
+void startfat(int fatstart, int nfatblocks, int nfatents); 
 
 
 

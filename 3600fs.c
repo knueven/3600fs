@@ -67,6 +67,16 @@ dirent getdirent(int block) {
   return dir;
 }
 
+int write_dirent(int block, dirent dir) {
+  char tmp[BLOCKSIZE];
+  memset(tmp, 0, BLOCKSIZE);
+  memcpy(tmp, &dir, BLOCKSIZE);
+  if (dwrite(block, tmp) != BLOCKSIZE) {
+    fprintf(stderr, "error writing dirent");
+  }
+return 512;
+}
+
 /*
  * Initialize filesystem. Read in file system metadata and initialize
  * memory structures. If there are inconsistencies, now would also be
@@ -83,12 +93,14 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
   // Do not touch or move this code; connects the disk
   dconnect();
 
-  v = getvcb();
+  vcb v = getvcb();
   //if we're dealing with the wrong disk. you should unmount if this error is thrown
   if (v.magic != MAGIC) {
     fprintf(stderr, "Wrong disk, magic # is incorrect\n");
   }
-
+  dirent d = getdirent(1);
+  fprintf(stderr, "dirent %d\n", d.valid);
+  startfat(v.fat_start, v.fat_length, v.num_fatents);
   return NULL;
 }
 
@@ -134,11 +146,11 @@ static int vfs_getattr(const char *path, struct stat *stbuf) {
       stbuf->st_gid = getgid();
       return 0;
   }
-  for(int i = 0; i < 100; i++) {
+  for(int i = 1; i < DE_LENGTH + 1; i++) {
     //read the dirent at block i
     dirent mydirent = getdirent(i);
     if ((strcmp(mydirent.name, path) == 0) && (mydirent.valid == 1)) {
-      fprintf( stderr, "In getattr: found the file %s in dirents\n", path);
+      fprintf( stderr, "In getattr: found the file %s in dirent %d\n", path, i);
     stbuf->st_uid =  mydirent.user;
     stbuf->st_gid = mydirent.group;
     //Creates pointers to structures so I can use them to get time
@@ -161,8 +173,8 @@ static int vfs_getattr(const char *path, struct stat *stbuf) {
       stbuf->st_blocks = 1;//a special case cause we allocate a block just when a file is creted
     else {
       stbuf->st_blocks  = ((mydirent.size -1) /BLOCKSIZE)  + 1;
+    }
       return 0;
-      }
     }
   } //end of for loop
   
@@ -215,8 +227,32 @@ static int vfs_mkdir(const char *path, mode_t mode) {
 static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi)
 {
+  char dirpath[128];
+  strcpy(dirpath, path);
+  // remove any trailing slash;strlen>1 cause we wont remove / for rootdir
+  if( strlen(dirpath) > 1 && dirpath[strlen(dirpath)-1] == '/') 
+     dirpath[strlen(dirpath)-1] = '\0';
 
-    return 0;
+  int i;
+  fprintf( stderr, "In vfs_readdir: for path = %s\n", dirpath);
+
+  filler( buf, ".", 0, 0);
+  filler( buf, "..", 0, 0);
+  for(i = 1; i < DE_LENGTH + 1; i++) {
+    dirent dir = getdirent(i);
+    if( dir.valid == 1) {
+         struct stat stats;
+         stats.st_mode = dir.mode;        
+         stats.st_uid = dir.user;
+         stats.st_gid = dir.group;
+         if( !strcmp(dirpath, "/"))
+           filler( buf, dir.name + 1, &stats,0);   
+         else
+           filler( buf, dir.name + strlen(dirpath) + 1, &stats,0);
+    }  
+  }
+
+  return 0;
 }
 
 /*
@@ -225,7 +261,52 @@ static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
  *
  */
 static int vfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+     fprintf(stderr, "vfs_create called for %s\n", path);
+     int i = 0;
+  //Checks to see if file already exists
+  for(i = 1; i < DE_LENGTH + 1; i++) {
+    dirent dx = getdirent(i);
+    if (strcmp(dx.name, path)==0) {
+      return -EEXIST;
+    }
+  }
+
+  for(i = 1; i < DE_LENGTH + 1;  i++) { //Loops through all dirents till an empty dirent is found
+    dirent dir = getdirent(i);
+    if (dir.valid == 0) {
+      fprintf(stderr, "In vfs_create: Found an empty dirent in %i, writing to it\n",i); //Tells us which block it is in
+      dir.valid = 1;
+      dir.first_block = getnewfatent();// allocate a fatent
+      
+      if( dir.first_block == -1) {
+         fprintf( stderr, "Error: no space on disk\n");
+         return -1; // todo return the error code for running out of space
+      }
+      dir.size = 0; // though a fatent is allocated, size is zero
+
+      //Fill in getuid, getgid mode and path
+      dir.user = getuid();
+      dir.group = getgid();
+      dir.mode = mode;
+      strcpy(dir.name, path);
+      clock_gettime(CLOCK_REALTIME, &dir.access_time);
+      clock_gettime(CLOCK_REALTIME, &dir.modify_time);
+      clock_gettime(CLOCK_REALTIME, &dir.create_time);
+
+    //and now write the dirent to disk
+    write_dirent(i, dir);
     return 0;
+  }
+}
+
+  //Checks to see if you have any free space
+  if(i == DE_LENGTH + 1) { 
+    fprintf(stderr, "Error: can't create file cause dirent is full\n");
+    return -1; //You got to 100, which means you have no space!
+  }
+  
+  
+  return 0;
 }
 
 /*
@@ -370,6 +451,59 @@ static struct fuse_operations vfs_oper = {
     .utimens	 = vfs_utimens,
     .truncate	 = vfs_truncate,
 };
+
+/*
+fattable
+will contain all the fat entries in the file system. In other words, 
+this will be a copy of the FAT table on the disk, but kept in memory. 
+*/
+fatent *fattable; 
+
+int totalfatblocks;
+int fatstartblock;
+int totalfatents; // total fat entries in our system, and in fattable
+int datastartblock; 
+
+/*
+@function startfat
+Will start the fat system by loading it into ram. Is called on mount. 
+On dismount, stopfat is called, which will write the in-memory fata to
+the disk
+*/
+void startfat(int fatstart, int nfatblocks, int nfatents) {
+  totalfatblocks = nfatblocks;
+  fatstartblock = fatstart;
+  datastartblock = fatstartblock + nfatblocks;
+  totalfatents = nfatents; // this is also equal to the total number of blocks available for storage, because each storage block has one fatend
+  
+
+  fattable = (fatent*) malloc( nfatblocks * BLOCKSIZE); 
+
+  for(int i = 0; i < nfatblocks; i++) { 
+    char buf[BLOCKSIZE];
+    memset(buf, 0, BLOCKSIZE);
+    dread(fatstart + i, buf);
+    //note: since fattable is fatent/int type, it requires use of 512/4=128
+    memcpy( fattable + 128 * i, buf, BLOCKSIZE);   
+  }
+
+  return;
+}
+
+/*
+@function getnewfatent 
+@return returns a newly allocated fat entry
+*/
+int getnewfatent() {
+  for(int i = 0; i < totalfatents; i++) {
+     if( fattable[i].used == 0) {
+        fattable[i].used = 1;
+        fattable[i].eof = 1;// likely to be true, though the caller is the one responsible for the correctness of the value of .eof
+        return i;
+     }
+  }
+  return -1;
+}
 
 int main(int argc, char *argv[]) {
     /* Do not modify this function */

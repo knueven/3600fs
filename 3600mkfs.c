@@ -46,6 +46,15 @@ vcb *create_vcb(int size) {
     return s;
 }
 
+dirent *create_dirent() {
+  //Create an empty directory
+  dirent *d;
+  d = (dirent *)calloc(1, sizeof(dirent));
+  assert(d != NULL);
+  d->valid = 0; //0 = not in use (free)
+  return d;
+}
+
 void myformat(int size) {
   // Do not touch or move this function
   dcreate_connect();
@@ -79,17 +88,12 @@ void myformat(int size) {
     //we're done with tmp
     free(tmp);
 
-  //Create an empty directory
-  dirent tempde;
-  tempde.valid = 0; //0 = not in use (free)
-  char dtmp[BLOCKSIZE]; //right now dirents take up the entire block
-  memset(dtmp, 0, BLOCKSIZE); 
-  memcpy(dtmp, &tempde, sizeof(dirent));
+  dirent *tempde = create_dirent();
 
   //For loop that copies data into DE entries
   //will start at 1 and write to de_length + 1
   for (int i=1; i<DE_LENGTH+1; i++) {
-    dwrite(i, dtmp);
+    dwrite(i, (char *)tempde);
   }
   // Do not touch or move this function
   dunconnect();
