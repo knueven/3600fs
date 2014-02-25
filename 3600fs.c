@@ -227,14 +227,8 @@ static int vfs_mkdir(const char *path, mode_t mode) {
 static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi)
 {
-  char dirpath[128];
-  strcpy(dirpath, path);
-  // remove any trailing slash;strlen>1 cause we wont remove / for rootdir
-  if( strlen(dirpath) > 1 && dirpath[strlen(dirpath)-1] == '/') 
-     dirpath[strlen(dirpath)-1] = '\0';
-
   int i;
-  fprintf( stderr, "In vfs_readdir: for path = %s\n", dirpath);
+  fprintf( stderr, "In vfs_readdir: for path = %s\n", path);
 
   filler( buf, ".", 0, 0);
   filler( buf, "..", 0, 0);
@@ -245,10 +239,10 @@ static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
          stats.st_mode = dir.mode;        
          stats.st_uid = dir.user;
          stats.st_gid = dir.group;
-         if( !strcmp(dirpath, "/"))
+         if( !strcmp(path, "/"))
            filler( buf, dir.name + 1, &stats,0);   
          else
-           filler( buf, dir.name + strlen(dirpath) + 1, &stats,0);
+           filler( buf, dir.name + strlen(path) + 1, &stats,0);
     }  
   }
 
@@ -357,10 +351,20 @@ static int vfs_write(const char *path, const char *buf, size_t size,
 static int vfs_delete(const char *path)
 {
 
-  /* 3600: NOTE THAT THE BLOCKS CORRESPONDING TO THE FILE SHOULD BE MARKED
-           AS FREE, AND YOU SHOULD MAKE THEM AVAILABLE TO BE USED WITH OTHER FILES */
+  for (int i = 1; i < DE_LENGTH + 1; i++) {
+    dirent dir = getdirent(i);
+    if (strcmp(dir.name, path) == 0 && dir.valid == 1) {
+      dir.valid = 0;
+      dir.name[0] = '\0';
+      removefats(dir.first_block);
+      write_dirent(i, dir);
+      return 0;
+    }
+  }
 
-    return 0;
+  //if control gets here, file did not exist
+  return -ENOENT;
+
 }
 
 /*
@@ -372,8 +376,20 @@ static int vfs_delete(const char *path)
  */
 static int vfs_rename(const char *from, const char *to)
 {
-
-    return 0;
+  fprintf(stderr, "vfs_rename called on %s", from);
+  for (int i = 1; i < DE_LENGTH + 1; i++) {
+    dirent dir = getdirent(i);
+    if (strcmp(dir.name, to) == 0 && dir.valid == 1) {
+      vfs_delete(to);
+    }
+    if (strcmp(dir.name, from) == 0 && dir.valid == 1) {
+      strcpy(dir.name, to);
+      write_dirent(i, dir);
+      return 0;
+    }
+    }
+    //not found
+    return -ENOENT;
 }
 
 
@@ -505,6 +521,18 @@ int getnewfatent() {
   return -1;
 }
 
+int removefats(int initial) {
+  int i = initial; 
+  
+  while( !fattable[i].eof) {
+    assert( fattable[i].used);
+    fattable[i].used = 0; 
+    i = fattable[i].next;
+  }
+  assert(fattable[i].used);
+  fattable[i].used = 0;
+  return 0;
+}
 int main(int argc, char *argv[]) {
     /* Do not modify this function */
     umask(0);
