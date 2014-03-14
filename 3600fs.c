@@ -17,6 +17,8 @@
 #endif
 
 #define _POSIX_C_SOURCE 199309
+#define MAGIC 777
+#define UNUSED(x) (void)(x)
 
 #include <time.h>
 #include <fuse.h>
@@ -38,43 +40,23 @@
 
 #include "3600fs.h"
 #include "disk.h"
+#include "subdirs.h"
+#include "subdirs.c"
 
+//empty directory, for some testing
+struct dirent_s emptyde;
 
- // Global VCB
-vcb v;
-char * disk_status;
-int num_blocks;
+//Global variables
+vcb myvcb; //VCB
+dirent dirents[100]; // Directory Entries
 
-vcb getvcb(){
-  vcb vb;
-  char temp_vb[BLOCKSIZE];
-  memset(temp_vb, 0, BLOCKSIZE);
-  if (dread(0, temp_vb) < 0) {
-	fprintf(stderr, "Error reading VCB\n");
-	}
-  memcpy(&vb, temp_vb, sizeof(vcb));
-  return vb;
-}
-
-dirent getdirent(int block) {
-  dirent dir;
-  char temp_dir[BLOCKSIZE];
-  memset(temp_dir, 0, BLOCKSIZE);
-  if (dread(block, temp_dir) < 0) {
-    fprintf(stderr, "Error reading dirent at block %d\n", block);
-  }
-  memcpy(&dir, temp_dir, sizeof(dirent));
-  return dir;
-}
-
-int write_dirent(int block, dirent dir) {
+//Helper function
+void write_dirent (int i) {
   char tmp[BLOCKSIZE];
   memset(tmp, 0, BLOCKSIZE);
-  memcpy(tmp, &dir, BLOCKSIZE);
-  if (dwrite(block, tmp) != BLOCKSIZE) {
-    fprintf(stderr, "error writing dirent");
-  }
-return 512;
+  memcpy(tmp, &dirents[i], sizeof(dirent));
+  dwrite(i+1,tmp);
+  return;
 }
 
 /*
@@ -93,14 +75,24 @@ static void* vfs_mount(struct fuse_conn_info *conn) {
   // Do not touch or move this code; connects the disk
   dconnect();
 
-  vcb v = getvcb();
-  //if we're dealing with the wrong disk. you should unmount if this error is thrown
-  if (v.magic != MAGIC) {
-    fprintf(stderr, "Wrong disk, magic # is incorrect\n");
+  char tmp[BLOCKSIZE];
+  memset(tmp, 0, BLOCKSIZE);
+  dread (0, tmp); 
+  memcpy(&myvcb, tmp, sizeof(vcb)); 
+
+  //magic number checker
+  if (myvcb.magic != MAGIC) {
+    fprintf(stderr, "WRONG DISK - UNMOUNT NOW");
   }
-  dirent d = getdirent(1);
-  fprintf(stderr, "dirent %d\n", d.valid);
-  startfat(v.fat_start, v.fat_length, v.num_fatents);
+
+  char detmp[BLOCKSIZE];
+  for (int i=0; i<100; i++) {
+    memset(detmp, 0, BLOCKSIZE); //Making detmp blocksize 0.
+    dread (i + 1, detmp); //Reading i from detmp
+    memcpy(&dirents[i], detmp, sizeof(dirent));//Copying detmp to dirents[i]
+  }
+
+  startfat( myvcb.fat_start, myvcb.fat_length, myvcb.num_fatents);
   return NULL;
 }
 
@@ -112,9 +104,17 @@ static void vfs_unmount (void *private_data) {
   UNUSED(private_data);
   fprintf(stderr, "vfs_unmount called\n");
 
-  /* 3600: YOU SHOULD ADD CODE HERE TO MAKE SURE YOUR ON-DISK STRUCTURES
-           ARE IN-SYNC BEFORE THE DISK IS UNMOUNTED (ONLY NECESSARY IF YOU
-           KEEP DATA CACHED THAT'S NOT ON DISK */
+  //write all directory entries to disk
+  for(int i = 0; i < 100; i++) {
+    char buf[BLOCKSIZE];
+    memset( buf, 0, BLOCKSIZE);
+    memcpy( buf, &dirents[i], sizeof(dirents[i]));
+    dwrite( 1 + i, buf);
+  }
+ 
+  //write fat table to disk too
+  stopfat();
+
 
   // Do not touch or move this code; unconnects the disk
   dunconnect();
@@ -132,57 +132,51 @@ static void vfs_unmount (void *private_data) {
  *
  */
 static int vfs_getattr(const char *path, struct stat *stbuf) {
-  fprintf(stderr, "vfs_getattr called on %s\n", path);
-  
+  fprintf(stderr, "vfs_getattr called for %s\n", path);
   // Do not mess with this code 
   stbuf->st_nlink = 1; // hard links
   stbuf->st_rdev  = 0;
   stbuf->st_blksize = BLOCKSIZE;
 
-  //if (The path represents the root directory)
+  // home directory, or the root of the file system is a special case, 
+  // because its entry does not exist in the dirents array
   if (strcmp(path, "/") == 0) {
-      stbuf->st_mode  = 0777 | S_IFDIR;
-      stbuf->st_uid = getuid();
-      stbuf->st_gid = getgid();
-      return 0;
+    stbuf->st_mode  = 0777 | S_IFDIR;
+    stbuf->st_uid = getuid();
+    stbuf->st_gid = getgid();
+    return 0;
   }
-  for(int i = 1; i < DE_LENGTH + 1; i++) {
-    //read the dirent at block i
-    dirent mydirent = getdirent(i);
-    if ((strcmp(mydirent.name, path) == 0) && (mydirent.valid == 1)) {
-      fprintf( stderr, "In getattr: found the file %s in dirent %d\n", path, i);
-    stbuf->st_uid =  mydirent.user;
-    stbuf->st_gid = mydirent.group;
-    //Creates pointers to structures so I can use them to get time
-    struct tm * acctm; //access time
-    struct tm * modtm; //modify time
-    struct tm * cretm; //created time
-    //localtime comverts tv_sec from timespec into a struct tm
-    acctm = localtime(&((mydirent.access_time).tv_sec));
-    modtm = localtime(&((mydirent.modify_time).tv_sec));
-    cretm = localtime(&((mydirent.create_time).tv_sec));
-    //and mktime makes sure things like the 40th of a month don't happen
-    stbuf->st_atime = mktime(acctm);
-    stbuf->st_mtime = mktime(modtm);
-    stbuf->st_ctime = mktime(cretm);
 
-    //set mode and size
-    stbuf->st_mode = mydirent.mode;
-    stbuf->st_size = mydirent.size;
-    if( mydirent.size == 0) 
+  for(int i = 0; i < 100; i++) {
+    if ((strcmp(dirents[i].name, path) == 0) && (dirents[i].valid == 1)) {
+      fprintf( stderr, "In getattr: found the file %s in dirents\n", path);
+    stbuf->st_uid =  dirents[i].user;
+    stbuf->st_gid = dirents[i].group;
+    //time structures
+    struct tm * accesstm;
+    struct tm * modifytm;
+    struct tm * createtm;
+    accesstm = localtime(&((dirents[i].access_time).tv_sec));
+    modifytm = localtime(&((dirents[i].modify_time).tv_sec));
+    createtm = localtime(&((dirents[i].create_time).tv_sec));
+
+    stbuf->st_atime = mktime(accesstm);
+    stbuf->st_mtime = mktime(modifytm);
+    stbuf->st_ctime = mktime(createtm);
+
+      stbuf->st_mode = dirents[i].mode;
+    stbuf->st_size = dirents[i].size;
+    if( dirents[i].size == 0) 
       stbuf->st_blocks = 1;//a special case cause we allocate a block just when a file is creted
-    else {
-      stbuf->st_blocks  = ((mydirent.size -1) /BLOCKSIZE)  + 1;
-    }
+    else
+      stbuf->st_blocks  = ((dirents[i].size -1) /BLOCKSIZE)  + 1;
       return 0;
     }
   } //end of for loop
   
   // if control reaches here, it means the file did not exist
-  fprintf(stderr, "File not found by vfs_getattr");
+  fprintf(stderr, "In vfs_getattr, file not found, returning ENOENT");
   return -ENOENT;
-
-  return 0;
 }
 
 /*
@@ -193,14 +187,9 @@ static int vfs_getattr(const char *path, struct stat *stbuf) {
  * HINT: Don't forget to create . and .. while creating a
  * directory.
  */
-/*
- * NOTE: YOU CAN IGNORE THIS METHOD, UNLESS YOU ARE COMPLETING THE 
- *       EXTRA CREDIT PORTION OF THE PROJECT.  IF SO, YOU SHOULD
- *       UN-COMMENT THIS METHOD.
 static int vfs_mkdir(const char *path, mode_t mode) {
-
-  return -1;
-} */
+  return 0;
+} 
 
 /** Read directory
  *
@@ -220,29 +209,38 @@ static int vfs_mkdir(const char *path, mode_t mode) {
  * @return 1 if buffer is full, zero otherwise
  * typedef int (*fuse_fill_dir_t) (void *buf, const char *name,
  *                                 const struct stat *stbuf, off_t off);
- *			   
+ *         
  * Your solution should not need to touch fi
  *
  */
-static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-                       off_t offset, struct fuse_file_info *fi)
-{
+static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
+  UNUSED(fi);
+  UNUSED(offset);
+  char dirpath[128];
+  strcpy(dirpath, path);
+  // remove any trailing slash;strlen>1 cause we wont remove / for rootdir
+  if( strlen(dirpath) > 1 && dirpath[strlen(dirpath)-1] == '/') 
+     dirpath[strlen(dirpath)-1] = '\0';
+
   int i;
-  fprintf( stderr, "In vfs_readdir: for path = %s\n", path);
+  fprintf( stderr, "In vfs_readdir: for path = %s\n", dirpath);
 
   filler( buf, ".", 0, 0);
   filler( buf, "..", 0, 0);
-  for(i = 1; i < DE_LENGTH + 1; i++) {
-    dirent dir = getdirent(i);
-    if( dir.valid == 1) {
+  for(i = 0; i < 100; i++) {
+    if( dirents[i].valid == 1) {
+      fprintf(stderr, "going to check isfilein for file = %s dir = %s\n", dirents[i].name, dirpath);
+      if (isfilein( dirents[i].name, dirpath) ) {
+         fprintf(stderr, "yes, file is in the given directory\n");
          struct stat stats;
-         stats.st_mode = dir.mode;        
-         stats.st_uid = dir.user;
-         stats.st_gid = dir.group;
-         if( !strcmp(path, "/"))
-           filler( buf, dir.name + 1, &stats,0);   
+         stats.st_mode = dirents[i].mode;        
+         stats.st_uid = dirents[i].user;
+         stats.st_gid = dirents[i].group;
+         if( !strcmp(dirpath, "/"))
+           filler( buf, dirents[i].name + 1, &stats,0);   
          else
-           filler( buf, dir.name + strlen(path) + 1, &stats,0);
+           filler( buf, dirents[i].name + strlen(dirpath) + 1, &stats,0);
+      }
     }  
   }
 
@@ -255,50 +253,67 @@ static int vfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
  *
  */
 static int vfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
-     fprintf(stderr, "vfs_create called for %s\n", path);
-     int i = 0;
+  UNUSED(fi);
+  fprintf(stderr, "vfs_create called for %s\n", path);
+  int i;
+  int validdir = 0;
+  char *dir = get_dir(path);
+  if (dir == 0)
+    return -1;
+
+  // if the file is not in the root directory, first make sure that the 
+  // directory in which it is being created actually exists
+  if(strcmp( dir, "")) {
+    for(i = 0; i < 100; i++) {
+       if(!strcmp(dir, dirents[i].name) && (dirents[i].mode & S_IFDIR)) {
+          // the directory exists; we can create the file
+          validdir = 1;
+          break;
+       }
+    }
+    if (!validdir) {
+      fprintf( stderr, "directory %s does not exist\n", dir);
+      return -ENOTDIR; 
+    }
+  }
+  
   //Checks to see if file already exists
-  for(i = 1; i < DE_LENGTH + 1; i++) {
-    dirent dx = getdirent(i);
-    if (strcmp(dx.name, path)==0) {
+  for(i = 0; i < 100; i++) {
+    if (strcmp(dirents[i].name, path)==0) {
       return -EEXIST;
     }
   }
 
-  for(i = 1; i < DE_LENGTH + 1;  i++) { //Loops through all dirents till an empty dirent is found
-    dirent dir = getdirent(i);
-    if (dir.valid == 0) {
+  for(i = 0; i < 100;  i++) { //Loops through all dirents till an empty dirent is found
+    if (dirents[i].valid == 0) {
       fprintf(stderr, "In vfs_create: Found an empty dirent in %i, writing to it\n",i); //Tells us which block it is in
-      dir.valid = 1;
-      dir.first_block = getnewfatent();// allocate a fatent
+      dirents[i].valid = 1;
+      dirents[i].first_block = getnewfatent();// allocate a fatent
       
-      if( dir.first_block == -1) {
+      if( dirents[i].first_block == -1) {
          fprintf( stderr, "Error: no space on disk\n");
          return -1; // todo return the error code for running out of space
       }
-      dir.size = 0; // though a fatent is allocated, size is zero
+      dirents[i].size = 0; // though a fatent is allocated, size is zero
 
       //Fill in getuid, getgid mode and path
-      dir.user = getuid();
-      dir.group = getgid();
-      dir.mode = mode;
-      strcpy(dir.name, path);
-      clock_gettime(CLOCK_REALTIME, &dir.access_time);
-      clock_gettime(CLOCK_REALTIME, &dir.modify_time);
-      clock_gettime(CLOCK_REALTIME, &dir.create_time);
-
-    //and now write the dirent to disk
-    write_dirent(i, dir);
-    return 0;
+      dirents[i].user = getuid();
+      dirents[i].group = getgid();
+      dirents[i].mode = mode;
+      strcpy(dirents[i].name, path);
+      clock_gettime(CLOCK_REALTIME, &dirents[i].access_time);
+      clock_gettime(CLOCK_REALTIME, &dirents[i].modify_time);
+      clock_gettime(CLOCK_REALTIME, &dirents[i].create_time);
+      write_dirent(i);
+      return 0;
+    }
   }
-}
-
+  
   //Checks to see if you have any free space
-  if(i == DE_LENGTH + 1) { 
+  if(i == 100) { 
     fprintf(stderr, "Error: can't create file cause dirent is full\n");
     return -1; //You got to 100, which means you have no space!
   }
-  
   
   return 0;
 }
@@ -319,8 +334,18 @@ static int vfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) 
 static int vfs_read(const char *path, char *buf, size_t size, off_t offset,
                     struct fuse_file_info *fi)
 {
-
-    return 0;
+  UNUSED(fi);
+  fprintf( stderr, "In vfs_read: path = %s size = %d offset = %d\n", path, size, offset);
+  for (int i = 0; i < 100; i++) {
+    if (strcmp(dirents[i].name, path) == 0 && dirents[i].valid == 1) {
+      fprintf( stderr, "for file %s size is %d, and its fats are: \n", dirents[i].name, dirents[i].size);
+      printfats( dirents[i].first_block);
+      int readbytes = readfromdisk( dirents[i].first_block, buf, size, offset, dirents[i].size);
+      fprintf( stderr, "\nin vfs_read: going to return %d\n", readbytes);
+      return readbytes;
+    }
+  }
+  return -ENOENT;
 }
 
 /*
@@ -334,37 +359,48 @@ static int vfs_read(const char *path, char *buf, size_t size, off_t offset,
  *
  * HINT: Ignore 'fi'
  */
-static int vfs_write(const char *path, const char *buf, size_t size,
-                     off_t offset, struct fuse_file_info *fi)
+static int vfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
+  UNUSED(fi);
+  fprintf( stderr, "In vfs_write: path = %s size = %d offset = %d\n", path, size, offset);
 
-  /* 3600: NOTE THAT IF THE OFFSET+SIZE GOES OFF THE END OF THE FILE, YOU
-           MAY HAVE TO EXTEND THE FILE (ALLOCATE MORE BLOCKS TO IT). */
+  for (int i = 0; i < 100; i++) {
+    if (strcmp(dirents[i].name, path) == 0 && dirents[i].valid == 1) {
+      int newsize = writetodisk( dirents[i].first_block, buf, size, offset, dirents[i].size);
+      if(newsize != -1) {
+         dirents[i].size = newsize;
+         fprintf(stderr, "write successfull, new file size = %d and  returning %d\nThe fats for the file are:", newsize, size);
+         printfats( dirents[i].first_block);
+         fprintf(stderr, "\n");
+         
+         return size;
+      } else {
+         return -1; // todo return error code for out of space
+      }
+    }
+  }  
 
-  return 0;
+  return -ENOENT;
 }
 
 /**
  * This function deletes the last component of the path (e.g., /a/b/c you 
  * need to remove the file 'c' from the directory /a/b).
  */
-static int vfs_delete(const char *path)
-{
+static int vfs_delete(const char *path) {
 
-  for (int i = 1; i < DE_LENGTH + 1; i++) {
-    dirent dir = getdirent(i);
-    if (strcmp(dir.name, path) == 0 && dir.valid == 1) {
-      dir.valid = 0;
-      dir.name[0] = '\0';
-      removefats(dir.first_block);
-      write_dirent(i, dir);
+  for (int i = 0; i < 100; i++) {
+    if (strcmp(dirents[i].name, path) == 0 && dirents[i].valid == 1) {
+      dirents[i].valid = 0;
+      dirents[i].name[0] = '\0';
+      removefats(dirents[i].first_block);
+      write_dirent(i);
       return 0;
     }
   }
-
-  //if control gets here, file did not exist
+  
+  // if control reaches here, that means the file did not exist
   return -ENOENT;
-
 }
 
 /*
@@ -374,22 +410,19 @@ static int vfs_delete(const char *path)
  * HINT: Renaming could also be moving in disguise
  *
  */
-static int vfs_rename(const char *from, const char *to)
-{
-  fprintf(stderr, "vfs_rename called on %s", from);
-  for (int i = 1; i < DE_LENGTH + 1; i++) {
-    dirent dir = getdirent(i);
-    if (strcmp(dir.name, to) == 0 && dir.valid == 1) {
-      vfs_delete(to);
-    }
-    if (strcmp(dir.name, from) == 0 && dir.valid == 1) {
-      strcpy(dir.name, to);
-      write_dirent(i, dir);
-      return 0;
-    }
-    }
-    //not found
-    return -ENOENT;
+static int vfs_rename(const char *from, const char *to) {
+  fprintf(stderr, "vfs_rename calledon %s", from);
+    for (int i = 0; i < 100; i++) {
+      if (strcmp(dirents[i].name, to) == 0 && dirents[i].valid == 1) {
+        vfs_delete(to);
+      }
+      if (strcmp(dirents[i].name, from) == 0 && dirents[i].valid == 1) {
+        strcpy(dirents[i].name, to);
+        return 0;
+      }
+      }
+      //not found
+      return -ENOENT;
 }
 
 
@@ -402,10 +435,15 @@ static int vfs_rename(const char *from, const char *to)
  * fcb->mode = (mode & 0x0000ffff);
  *
  */
-static int vfs_chmod(const char *file, mode_t mode)
-{
-    chmod(file, mode);
-    return 0;
+static int vfs_chmod(const char *file, mode_t mode) {
+  for (int i = 0; i < 100; i++) {
+    if (strcmp(dirents[i].name, file) == 0 && dirents[i].valid == 1) {
+      dirents[i].mode = (mode & 0x0000ffff); 
+      return 0;
+    }
+  }
+   
+  return -ENOENT;
 }
 
 /*
@@ -413,34 +451,63 @@ static int vfs_chmod(const char *file, mode_t mode)
  * to be uid and gid.  This should only update the file's owner
  * and group.
  */
-static int vfs_chown(const char *file, uid_t uid, gid_t gid)
-{
-
-    return 0;
+static int vfs_chown(const char *file, uid_t uid, gid_t gid) {
+  for(int i = 0; i < 100; i++) {
+        if (strcmp(dirents[i].name, file)==0) {
+            dirents[i].user = uid;
+            dirents[i].group = gid;
+            return 0;
+        }
+      }
+      return -1;
 }
 
 /*
  * This function will update the file's last accessed time to
  * be ts[0] and will update the file's last modified time to be ts[1].
  */
-static int vfs_utimens(const char *file, const struct timespec ts[2])
-{
-
-    return 0;
+static int vfs_utimens(const char *file, const struct timespec ts[2]){
+  for(int i = 0; i < 100; i++) {
+        if (strcmp(dirents[i].name, file)==0) {
+            dirents[i].access_time = ts[0];
+            dirents[i].modify_time = ts[1];
+            return 0;
+        }
+      }
+      return -1;
 }
 
 /*
  * This function will truncate the file at the given offset
  * (essentially, it should shorten the file to only be offset
  * bytes long).
+ *
+ * On success, 0 is returned by truncate, as mentioned in man 
+ * page of truncate(2)
  */
 static int vfs_truncate(const char *file, off_t offset)
 {
-
-  /* 3600: NOTE THAT ANY BLOCKS FREED BY THIS OPERATION SHOULD
-           BE AVAILABLE FOR OTHER FILES TO USE. */
-
-    return 0;
+  
+  for (int i = 0; i < 100; i++) {
+    if (strcmp(dirents[i].name, file) == 0 && dirents[i].valid == 1) {
+       
+      if( dirents[i].first_block == -1)
+        return -1;
+      fprintf(stderr, "Before calling truncatefat, fats for file are:\n");
+      printfats( dirents[i].first_block);
+      int newsize = truncatefat(dirents[i].first_block, offset, dirents[i].size); 
+      if(newsize == -1) {
+        fprintf( stderr, "error with truncatefat, returning -1\n");
+        return -1;
+      }
+     
+      fprintf(stderr, "After calling truncatefat, fats for file are:\n");
+      printfats( dirents[i].first_block);
+      dirents[i].size = newsize;
+      return 0;  
+    }
+  }
+  return -ENOENT;
 }
 
 
@@ -450,27 +517,28 @@ static int vfs_truncate(const char *file, off_t offset)
  * NOTE: If you're supporting multiple directories for extra credit,
  * you should add 
  *
- *     .mkdir	 = vfs_mkdir,
+ *     .mkdir  = vfs_mkdir,
  */
 static struct fuse_operations vfs_oper = {
     .init    = vfs_mount,
     .destroy = vfs_unmount,
     .getattr = vfs_getattr,
     .readdir = vfs_readdir,
-    .create	 = vfs_create,
-    .read	 = vfs_read,
-    .write	 = vfs_write,
-    .unlink	 = vfs_delete,
-    .rename	 = vfs_rename,
-    .chmod	 = vfs_chmod,
-    .chown	 = vfs_chown,
-    .utimens	 = vfs_utimens,
-    .truncate	 = vfs_truncate,
+    .create  = vfs_create,
+    .read  = vfs_read,
+    .write   = vfs_write,
+    .unlink  = vfs_delete,
+    .rename  = vfs_rename,
+    .chmod   = vfs_chmod,
+    .chown   = vfs_chown,
+    .utimens   = vfs_utimens,
+    .truncate  = vfs_truncate,
+    .mkdir       = vfs_mkdir,
 };
 
 /*
-fattable
-will contain all the fat entries in the file system. In other words, 
+@variable fattable
+Will contain all the fat entries in the file system. In other words, 
 this will be a copy of the FAT table on the disk, but kept in memory. 
 */
 fatent *fattable; 
@@ -520,8 +588,72 @@ int getnewfatent() {
   }
   return -1;
 }
+/**
+@function allocatenfatents ( allocate n fatents)
 
-int removefats(int initial) {
+Will return n number of newly allocated fatents by placing them in arr.
+arr should already be allocated, and should be able to hold n fatents
+
+@return returns the array, allocated with new fat ents; returns 0 on failure
+*/
+int allocatenfatents(int n, int* arr) {
+  assert( n >= 0);
+  assert( arr);  
+
+  // now go over the fatents sequentially and try to allocate n unused ones
+  int counter = 0;
+  for(int i = 0; (i < totalfatents) && (counter < n); i++) {
+     if( fattable[i].used == 0) {
+        fattable[i].used = 1;
+        arr[counter++] = i;
+     }
+  }
+
+  if( counter < (n-1)) {
+    fprintf( stderr, "Error: In allocatenfatents:no more space on disk\n"); 
+    return 0;//means we have run out of fat entries; 
+  }
+  else
+    return n; 
+}
+
+/**
+@function addnewblocks
+*/
+int addnewblocks( int initial, int newblocks) {
+  if (newblocks == 0) 
+    return 0;
+
+  int i = initial; 
+
+  while( !fattable[i].eof) {
+    i = fattable[i].next;
+  }
+
+  int *arr = (int *)malloc( newblocks * sizeof(int));
+  int n = allocatenfatents( newblocks, arr); 
+  if( n != newblocks)
+    return -1;
+
+  fattable[i].eof = 0;
+  fattable[i].used = 1;
+  fattable[i].next = arr[0];
+  int j;
+  for( j = 0; j < newblocks -1 ; j++) {
+    fattable[arr[j]].eof = 0;   
+    fattable[arr[j]].used = 1;  
+    fattable[arr[j]].next = arr[j+1]; 
+    //fprintf(stderr, "added new block %d\n", arr[j]);
+  } 
+  //fprintf(stderr, "added last new block %d\n", arr[j]);
+  fattable[arr[j]].eof = 1;
+  //fprintf(stderr, "block %d is eof\n", arr[j]);
+  fattable[arr[j]].used = 1;
+
+  return newblocks; 
+} 
+
+int removefats( int initial) {
   int i = initial; 
   
   while( !fattable[i].eof) {
@@ -529,10 +661,413 @@ int removefats(int initial) {
     fattable[i].used = 0; 
     i = fattable[i].next;
   }
-  assert(fattable[i].used);
+  assert( fattable[i].used);
   fattable[i].used = 0;
   return 0;
 }
+
+/**
+@function block 
+Helper function that just tells in which block a byte would be 
+The unit is in length, so 0-512 are in 0th block( the first block)
+bytes 513-1024 are in block 1, etc
+
+An offset is different than size of a file. offset 0 is at size 1; this
+fact is useful when invoking this function
+*/
+int block(int lengthinbytes) {
+  if(lengthinbytes == 0)
+    return 0;
+  else
+    return (lengthinbytes-1 )/BLOCKSIZE ;
+}
+
+
+
+/**
+@function writetochained 
+
+This function assumes that all the blocks in the chain are properly allocated, and buf is to be written into these allocated blocks
+
+*/ 
+
+int writetochained( int initial, const char *buf, int buflen, int offset) {
+  int offsetblock = block(offset+1); 
+  int dsb = datastartblock;    
+
+  int i = initial;
+  int blocknum = 0;
+
+  // we start by finding out the first int to which we have to write, 
+  // which is the block that is sequentially equal to offsetblock 
+  while( !fattable[i].eof ) {
+    if( fattable[i].used == 0) {// something critical is wrong
+      fprintf(stderr, "Error in fat.c::writeochained\n");
+      return -1; 
+    }
+    if( blocknum == offsetblock) {
+      break;
+    } 
+    blocknum++;
+    i = fattable[i].next;
+  }
+  fprintf(stderr, "In writetochained: reached %d\n", i);
+
+  if( blocknum != (offsetblock))
+    return -1;// means eof was reached before we could start writing, which goes against the assumption of this function, that we have enough blocks allocated to write the buf
+ 
+  // now to start writing 
+  if( block( offset + 1) == block ( offset + buflen)) {
+    // in this case, only one block needs to be written to
+    char tmp[BLOCKSIZE];
+    dread( dsb + i, tmp);
+    memcpy( tmp + offset%BLOCKSIZE, buf, buflen); 
+    dwrite(dsb + i, tmp);
+  } else {
+    // in this case, we need to write to more than one block, cause this 
+    // is the case when block(offset) < block( offset + buflen), so the
+    // buf spans multiple blocks
+    char tmp[BLOCKSIZE];
+    // write to first blcok
+    int len = BLOCKSIZE - offset%BLOCKSIZE;
+    fprintf(stderr, "In writetochained: writing %d bytes to block number %d\n", len, i);
+    dread( dsb + i, tmp);
+    memcpy( tmp + offset%BLOCKSIZE, buf, len); 
+    dwrite(dsb + i, tmp);
+    blocknum++; // this keeps track of the current block 
+ 
+    i = fattable[i].next; // go to next block 
+    int lastblock = block( offset + 1 + buflen); 
+    fprintf(stderr, "next = %d blocknum = %d lastblock = %d\n", i, blocknum, lastblock );
+    // now write to intermediate blocks, if any
+    int j;
+    for(j = 0; blocknum < lastblock; blocknum++, i = fattable[i].next, j++) {
+      fprintf(stderr, "In writetochained: in for loop, writing a complete block to block id %d; blocknum = %d\n", i, blocknum);
+      dwrite(dsb + i, (char*)buf + (j + 1) * BLOCKSIZE - offset%BLOCKSIZE);
+    }
+       
+    // and write to last block 
+    dread( dsb + i, tmp);
+    len = (offset+buflen)%BLOCKSIZE; 
+    memset(tmp, 0, BLOCKSIZE);
+    memcpy( tmp, buf + (j+1) *BLOCKSIZE - offset%BLOCKSIZE, len);
+    fprintf(stderr, "In writetochained: writing %d bytes to last block %d\nfirst byte written is \"%c\"", len, i, tmp[0]);
+    dwrite(dsb + i, tmp);
+    // just write the eof 
+    fattable[i].eof = 1;
+  }
+  
+  return buflen;
+}
+
+/*
+@function writetodisk
+Writes buflen number of bytes to the fatentry specified by value initial
+Will allocate new blocks if it is required to do so
+*/
+int writetodisk(int initial, const char *buf, int buflen, int offset, int filelen) {
+  if( initial == -1 || buf == 0) {
+    return -1;
+  } 
+
+  if( buflen == 0) {
+    return 0; 
+  }
+ 
+  int dsb = datastartblock;    // using a shorter name
+  fprintf(stderr, "in writetodisk; buflen = %d offset = %d filelen = %d\n", buflen, offset, filelen); 
+  // fine current number of file blocks using filelen
+
+
+  // check if we require to allocate more blocks 
+  if(filelen == 0) {//filelen==0 is a special case, cause a block is allocated already
+    if( buflen <= BLOCKSIZE) {// we can just write to the 1st block
+      char tmp[BLOCKSIZE];
+      memset(tmp, 0, BLOCKSIZE);
+      memcpy( tmp + offset, buf, buflen);
+      dwrite( dsb + initial, tmp);
+      fattable[initial].used = 1; // just to be on the safe side
+      fattable[initial].eof = 1; // cause this is the end of file
+      return offset + buflen; // this is the new size of the file
+    } else {
+      // we need to allocate blocks for (buflen - 512) bytes; its -512 cause
+      // the first block is already allocated and ready to be used
+      int nblocksrequired = (buflen- BLOCKSIZE - 1)/512 + 1;
+      int *allocatedblocks = (int *) malloc( nblocksrequired * sizeof (int));
+      int numallocatedblocks = allocatenfatents( nblocksrequired, allocatedblocks); 
+      fprintf(stderr, "allocated %d blocks\n", numallocatedblocks);
+      assert( numallocatedblocks == nblocksrequired);//just making sure
+   
+      //copy initial BLOCKSIZE bytes to the first block, which was already allocated
+      dwrite( dsb + initial, (char *)buf);// dwrite will just pick BLOCKSIZE bytes  
+      // now copy buffer starting at buf + 512, of lenght buflen-512 
+      // also set the respective .used and .eof flags
+ 
+      fattable[initial].used = 1;
+      fattable[initial].eof = 0; 
+      fattable[initial].next = allocatedblocks[0];
+      fprintf( stderr, "Write BLOCKSIZE to first initial block %d\n", initial);
+      // we copy the buffer by copyintg n-1 full blocks, and then the last
+      // blocks is partially(or fully) copied
+ 
+      for(int i = 0; i < numallocatedblocks; i++) {
+        fattable[ allocatedblocks[i]].used = 1;
+        if( i < (numallocatedblocks-1)) {
+          fprintf( stderr, "writing full block number %d\n", allocatedblocks[i]);
+          // there is a succeeding block for this block, so set the fields
+          // accordingly
+          fattable[ allocatedblocks[i]].next = allocatedblocks[i+1];
+          fattable[ allocatedblocks[i]].eof = 0;
+          // now copy the full buffer; 
+          dwrite(dsb + allocatedblocks[i], (char *)(buf + BLOCKSIZE + i * BLOCKSIZE));
+        } 
+        else {
+          // this is the last block in the chain
+          fattable[ allocatedblocks[i]].next = 0;
+          //fprintf(stderr, "block %d is eof\n", allocatedblocks[i]);
+          fattable[ allocatedblocks[i]].eof = 1;
+          // copy buffer;in this case the buffer may be less than BLOCKSIZE
+          int len = buflen - BLOCKSIZE - i * BLOCKSIZE; 
+          char tmp[BLOCKSIZE];
+          memset( tmp, 0, BLOCKSIZE);
+          memcpy( tmp, buf + BLOCKSIZE + i * BLOCKSIZE, len); 
+          dwrite( dsb + allocatedblocks[i], tmp);
+          fprintf( stderr, "writing partially, block number %d bytes = %d first byte writtten = \"%c\"\n", allocatedblocks[i], len, buf[ BLOCKSIZE + i * BLOCKSIZE]);
+        }
+      } // end for loop which writes to blocks
+    }
+    return offset + buflen;
+  }
+  else if( filelen < buflen + offset) {
+    // in this case we MAY need to allocate more blocks
+    if(block(filelen) < block( offset + buflen )) {
+       // this is the case when we need more blocks, equal to "newblocks"
+       int newblocks = block(offset + buflen) - block( filelen); 
+
+       fprintf(stderr,"In write to disk4: allocating %d new blocks\n"
+                      "block(offset + buflen) = %d block(filelen) %d\n",
+                       newblocks, block( offset+buflen), block(filelen));
+      
+       addnewblocks(initial, newblocks);//this will allocate our new blocks 
+    
+       // there are two cases here: if offset starts after filelen,then
+       // we are required to pad the intermediate space with zeros
+       if( offset > filelen) {
+         // pad with zeros
+       } else {
+         // nothing needs to be done here
+       }
+
+       // now we have allocated blocks, and padded if it was required, so
+       // we are ready to copy the buf to the allocated bytes
+       writetochained( initial, buf, buflen, offset ); 
+       return buflen + offset; // this is the new size of the file
+    } else {
+      // the extra bytes can be copied in the allocated blocks
+      writetochained(initial, buf, buflen, offset); 
+      return buflen + offset; // the old size remains
+    }   
+
+  }  else {
+    // no need to allocate more blocks
+    writetochained(initial, buf, buflen, offset); 
+    return filelen;
+  }
+     
+
+}
+
+int readfromdisk(int initial, char *buf, int buflen, int offset, int filelen) {
+  if( offset >= filelen) {
+    return -1;
+  }
+
+  const int dsb = datastartblock;
+  int startblock = block(offset+1); 
+  int endblock;
+
+  if( filelen < offset + buflen) {
+    buflen = filelen - offset;
+  } 
+ 
+  endblock = block( offset + buflen);
+
+  int counter = 0;
+  int i = initial;
+  while(!fattable[i].eof) {
+    
+    if( counter == startblock)
+      break; 
+  
+    i = fattable[i].next; 
+    fprintf(stderr, "In readfromdisk: skipping over fat num %d\n",i);
+    counter++;
+  }  
+  fprintf(stderr, "In readfromdisk: startblock = %d endblock = %d i = %d\n", startblock, endblock, i);
+  int alreadyread = 0; 
+  int readlen = buflen;
+  if( offset + buflen > filelen)
+    readlen = filelen - offset; 
+
+  int toread = readlen;
+  if(offset%BLOCKSIZE + readlen > BLOCKSIZE) {
+    // this means we have to read more than one block
+    fprintf( stderr, "readfromdisk: going to read from more than one block\n");
+    // read the first block
+    char tmp[BLOCKSIZE];
+    memset(tmp,0, BLOCKSIZE);
+    dread( dsb + i, tmp);
+    memcpy( buf, tmp + offset%BLOCKSIZE, BLOCKSIZE - offset%BLOCKSIZE);
+    alreadyread = BLOCKSIZE - offset%BLOCKSIZE;   
+    i = fattable[i].next; // important part, to make sure we read the next blk
+    counter++; // keeps count of number of blocks read
+ 
+    // the remaining bytes to be read
+    readlen = readlen - alreadyread; 
+     
+         
+    // now go over the rest of the blocks
+    while(counter<=endblock) {
+      fprintf(stderr, "In while: i = %d counter = %d\n", i, counter );
+      if( fattable[i].used != 1)
+        return -1; // something wrong here, so quit from the function
+      
+      if(readlen <= BLOCKSIZE) { // the last iteration of the while loop
+        // read just this block now, then break from loop
+        memset(tmp,0, BLOCKSIZE);
+        dread( dsb + i, tmp);
+        memcpy( buf + alreadyread, tmp, readlen);
+        fprintf( stderr, "read readlen = %d bytes from last block = %d; first byte read is \"%c\" at alreadyread = %d\n", readlen, i, buf[alreadyread ], alreadyread );
+        alreadyread += readlen;
+        break; 
+      } else {
+        memset(tmp,0, BLOCKSIZE);
+        dread( dsb + i, tmp);
+        fprintf(stderr, "alreadyread = %d readlen = %d\n", alreadyread, readlen);
+        memcpy( buf + alreadyread, tmp, BLOCKSIZE);
+        alreadyread += BLOCKSIZE;
+        readlen -= BLOCKSIZE;
+      }
+      fprintf(stderr, "In readfromdisk: read from block i = %d, next = %d\n", i, fattable[i].next);
+      i = fattable[i].next;
+      counter++;
+    }
+    
+    if( toread != alreadyread) {
+      fprintf( stderr, "toread = %d alreadyread =%d and are not equal\n", toread, alreadyread);
+      assert(0);
+    }
+    return alreadyread; 
+  } else {
+    // read just one block, the current one (i)
+    char tmp[BLOCKSIZE];
+    memset(tmp,0, BLOCKSIZE);
+    dread( dsb + i, tmp);
+    memcpy( buf, tmp + offset%BLOCKSIZE, readlen);
+    return readlen;   
+  }
+
+  return 0;
+}
+
+int truncatefat( int initial, int offset, int filelen) {
+  
+  if( offset > filelen)
+    return -1;
+
+
+  if(block(offset) == block( filelen)) {
+    // in this case we dont need to free any block
+    return offset;
+  } else if( block(offset + 1) < block(filelen)) {
+    // in this case, we need to free at least one block
+       
+    // find the int in which offset exists
+    int offsetblock = block(offset +1); 
+    int i = initial;
+    int counter = 0;
+    while(!fattable[i].eof) {
+      if( fattable[i].used == 0)
+        return -1; 
+  
+      if( counter == offsetblock)
+        break;
+  
+      i = fattable[i].next;
+      counter++;
+    }
+    
+    // now i is the int after which we have to free all 
+    if(fattable[i].eof == 1) {
+      fprintf( stderr, "In truncatefat: error somewhere, returning -1\n");
+      return -1;
+    }
+    
+    fattable[i].eof = 1; // this will be the last block now  
+    fprintf(stderr, "block %d is eof\n", i);
+    i = fattable[i].next;
+    while(!fattable[i].eof) { 
+      fattable[i].used = 0;
+      i = fattable[i].next;
+      fprintf( stderr, "In truncatefat: removed a block %d\n", i);
+    }
+    fattable[i].used = 0;
+    fattable[i].eof = 0;
+    return offset;
+  } 
+  
+  // block(offset) > block(filelen) is not possible because we 
+  // already checked for it in the initial if condition
+ 
+  return -1;
+}
+/*
+@funcion stopfat
+
+The major or only job of this function is to write the in-memory fat table
+to disk. It does so one block at a time, as is allowed by our disk.
+*/
+void stopfat() {
+  
+  
+  for(int i = 0; i < totalfatblocks; i++) { 
+    char buf[BLOCKSIZE];
+    memcpy( buf, fattable + 128 * i, BLOCKSIZE);//requires 128 cause sizeof(fattable) is 4
+    dwrite(fatstartblock + i, buf);
+  }
+ 
+  return;
+}
+
+int printfats( int initial) {
+ 
+  int i = initial; 
+  
+  while(!fattable[i].eof) {
+    fprintf( stderr, "%d ", i);
+    i = fattable[i].next;
+  }
+  fprintf( stderr, "%d", i);
+
+  return 0;
+}
+
+/* 
+@funcion showfatstatus
+Will display the status of fat table
+*/
+void showfatstatus() {
+  fprintf(stderr, "FAT status\n---------------------\nThe following blocks are in use\n");
+  for(int i = 0; i < totalfatents; i++) {
+    if( fattable[i].used)
+      fprintf(stderr, "%d, ", i);
+    }
+  fprintf(stderr, "\n");
+  return;  
+}
+
+
+
 int main(int argc, char *argv[]) {
     /* Do not modify this function */
     umask(0);
@@ -542,4 +1077,3 @@ int main(int argc, char *argv[]) {
     }
     return fuse_main(argc, argv, &vfs_oper, NULL);
 }
-
